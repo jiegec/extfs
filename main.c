@@ -98,7 +98,6 @@ void remove_ending_slash(char *path) {
 
 int check_filename_valid(char *path) {
     size_t len = strlen(path);
-    len = strlen(path);
     if (len >= 252 - 1) {
         printf("ERR: File name length exceed limit.\n");
         return ERROR;
@@ -192,7 +191,7 @@ uint32_t find_path_inode(char *path) {
 }
 
 void pwd(int output) {
-    uint32_t i, block, index;
+    uint32_t i, block;
     if (cur_depth > 0) {
         buffer[0] = '\0';
         for (i = 0; i < cur_depth; i++) {
@@ -201,7 +200,6 @@ void pwd(int output) {
             block = fp->nodes[dir_inodes[i]].blocks[0];
             for (int j = 0; j < MAX_DIRENTRY_PER_BLOCK; j++) {
                 if (fp->nodes[dir_inodes[i]].bitmap[j] != 0) {
-                    uint32_t id = fp->blocks[block].entries[j].id;
                     if (dir_inodes[i + 1] == fp->blocks[block].entries[j].id) {
                         strcat(buffer, fp->blocks[block].entries[j].name);
                         break;
@@ -457,7 +455,9 @@ void echo() {
                 fp->nodes[id].bitmap[i] = 1;
                 strcpy(fp->blocks[block].entries[i].name, file_name);
                 fp->blocks[block].entries[i].id = new_inode;
-                strcpy(fp->blocks[fp->nodes[new_inode].blocks[0]].data, str);
+                uint32_t len = (uint32_t)strlen(str);
+                fp->nodes[new_inode].file_size = len;
+                memcpy(fp->blocks[fp->nodes[new_inode].blocks[0]].data, str, len);
                 break;
             }
         }
@@ -488,7 +488,9 @@ void cat() {
                     printf("ERR: Cannot cat a dir.\n");
                     return;
                 }
-                printf("%s\n", fp->blocks[fp->nodes[index].blocks[0]].data);
+                memcpy(buffer, fp->blocks[fp->nodes[index].blocks[0]].data, fp->nodes[index].file_size);
+                buffer[fp->nodes[index].file_size] = '\0';
+                printf("%s\n", buffer);
                 return;
             }
         }
