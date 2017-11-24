@@ -98,18 +98,21 @@ void remove_ending_slash(char *path) {
 
 int check_filename_valid(char *path) {
     size_t len = strlen(path);
-    if (len >= 252 - 1) {
-        printf("ERR: File name length exceed limit.\n");
+    if (len >= MAX_FILENAME - 1) {
+        printf("ERR: Name length exceed limit.\n");
+        return ERROR;
+    } else if (len == 0) {
+        printf("ERR: Name cannot be empty.\n");
         return ERROR;
     }
     for (size_t i = 0; i < len; i++) {
         if (!(isalnum(path[i]) || path[i] == '.' || path[i] == '_')) {
-            printf("ERR: File name cannot contain invalid char.\n");
+            printf("ERR: Name cannot contain invalid char.\n");
             return ERROR;
         }
     }
     if (strcmp(path, ".") == 0 || strcmp(path, "..") == 0) {
-        printf("ERR: File name cannot be \"..\" or \".\"");
+        printf("ERR: Name cannot be \"..\" or \".\".\n");
         return ERROR;
     }
     return 0;
@@ -278,7 +281,7 @@ void ls() {
     if (temp_depth > 0) {
         printf("../\n");
     }
-    printf(".\n");
+    printf("./\n");
     uint32_t block;
     block = fp->nodes[temp_dir_inodes[temp_depth]].blocks[0];
     for (int i = 0; i < MAX_DIRENTRY_PER_BLOCK; i++) {
