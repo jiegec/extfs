@@ -1,6 +1,7 @@
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
+#include <ctype.h>
 
 const int MAX_INODE = 4096;
 const int MAX_BLOCK = 4096;
@@ -8,6 +9,7 @@ const int MAX_BLOCKS_PER_FILE = 1;
 const int MAX_FILENAME = 252;
 const int MAX_DIRENTRY_PER_BLOCK = 16;
 const uint32_t ERROR = 0xFFFFFFFF;
+const char *DATA_FILE = "data.dsk";
 
 const int MODE_DIR = 1;
 const int MODE_FILE = 2;
@@ -36,7 +38,7 @@ struct entry {
 };
 
 union data {
-    uint8_t data[4096];
+    char data[4096];
     struct {
         struct entry entries[MAX_DIRENTRY_PER_BLOCK];
     };
@@ -94,8 +96,8 @@ void format() {
 }
 
 void read_fs() {
-    printf("Reading fs from data.dsk ...\n");
-    FILE *FP = fopen("data.dsk", "rb");
+    printf("Reading fs from %s ...\n", DATA_FILE);
+    FILE *FP = fopen(DATA_FILE, "rb");
     if (FP == NULL) {
         printf("File not found -- creating a new disk.\n");
         format();
@@ -108,9 +110,9 @@ void read_fs() {
 
 void write_fs() {
     printf("Now saving data to disk..\n");
-    FILE *FP = fopen("data.dsk", "wb");
+    FILE *FP = fopen(DATA_FILE, "wb");
     if (FP == NULL) {
-        fprintf(stderr, "Open data.dsk failed. Will lose all changes.\n");
+        fprintf(stderr, "Open %s failed. Will lose all changes.\n", DATA_FILE);
     } else {
         fwrite(fp, sizeof(struct file), 1, FP);
         fclose(FP);
@@ -144,50 +146,6 @@ void pwd(int output) {
     }
 }
 
-/*
-void cd() {
-    uint32_t block;
-    struct entry *dir;
-    block = fp->nodes[dir_inodes[cur_depth]].blocks[0];
-    dir = &fp->blocks[block].entries[0];
-    if (strtok(cmd, " ") != NULL) {
-        char *name = strtok(NULL, " ");
-        if (name == NULL) {
-            printf("ERR: Dir name cannot be empty.\n");
-            return;
-        }
-        if (strcmp(name, "/") == 0) {
-            cur_depth = 0;
-            return ;
-        }
-        if (strcmp(name, ".") == 0) {
-            return;
-        } else if (strcmp(name, "..") == 0) {
-            if (cur_depth == 0) {
-                printf("ERR: Already at root.\n");
-            } else {
-                cur_depth--;
-            }
-        } else {
-            int found = 0;
-            for (int i = 0; i < MAX_DIRENTRY_PER_BLOCK; i++) {
-                if (fp->nodes[dir_inodes[cur_depth]].bitmap[i] != 0) {
-                    if (strcmp(name, fp->blocks[block].entries[i].name) == 0) {
-                        uint32_t id = fp->blocks[block].entries[i].id;
-                        if (fp->nodes[id].mode == MODE_DIR) {
-                            dir_inodes[++cur_depth] = id;
-                        } else if (fp->nodes[id].mode == MODE_FILE) {
-                            printf("ERR: %s is a file, not a directory.\n", name);
-                        }
-                        found = 1;
-                    }
-                }
-            }
-            if (found == 0)
-                printf("ERR: %s not found.\n", name);
-        }
-    }
-}*/
 
 uint32_t find_path_inode(char *path) {
     size_t len = strlen(path);
@@ -231,6 +189,10 @@ uint32_t find_path_inode(char *path) {
         }
         if (!found) {
             free(temp);
+            printf("ERR: Path not found.\n");
+            return ERROR;
+        } else if (fp->nodes[cur_inode].mode != MODE_DIR) {
+            printf("ERR: Bad path.\n");
             return ERROR;
         }
         next:
@@ -314,12 +276,19 @@ void mkdir() {
             }
             path = last_sep+1;
         }
-        if (strlen(path) >= 252 - 1) {
+        len = strlen(path);
+        if (len >= 252 - 1) {
             printf("ERR: Dir name length exceed limit.\n");
             return;
         }
-        uint32_t id = temp_dir_inodes[temp_depth];
+        for (size_t i = 0; i < len; i++) {
+            if (!(isalnum(path[i]) || path[i] == '.' || path[i] == '_')) {
+                printf("ERR: Path cannot contain invalid char.\n");
+                return;
+            }
+        }
 
+        uint32_t id = temp_dir_inodes[temp_depth];
         uint32_t block;
         block = fp->nodes[id].blocks[0];
         for (int i = 0; i < MAX_DIRENTRY_PER_BLOCK; i++) {
@@ -354,9 +323,9 @@ void rmdir_recursively(uint32_t id) {
             uint32_t cur_id = fp->blocks[block].entries[i].id;
             if (fp->nodes[cur_id].mode == MODE_DIR) {
                 rmdir_recursively(cur_id);
-                fp->nodes[id].entry_count--;
-                fp->nodes[id].bitmap[i] = 0;
             }
+            fp->nodes[id].entry_count--;
+            fp->nodes[id].bitmap[i] = 0;
             fp->sb.block_bitmap[fp->nodes[cur_id].blocks[0]] = 0;
             fp->sb.inode_bitmap[cur_id] = 0;
         }
@@ -435,7 +404,9 @@ void rmdir() {
 
 void dump_inode() {
     for (int i = 0; i < MAX_INODE; i++) {
-        if (fp->sb.inode_bitmap[i] != 0 && fp->nodes[i].mode == MODE_DIR) {
+        if (fp->sb.inode_bitmap[i] == 0)
+            continue;
+        if (fp->nodes[i].mode == MODE_DIR) {
             printf("Inode #%d: dir\n", i);
             uint32_t block = fp->nodes[i].blocks[0];
             printf("Block #%d:\n", block);
@@ -447,9 +418,172 @@ void dump_inode() {
             }
         } else if (fp->nodes[i].mode == MODE_FILE) {
             printf("Inode #%d: file\n", i);
-            printf("Block: %d\n", fp->nodes[i].blocks[0]);
+            uint32_t block = fp->nodes[i].blocks[0];
+            printf("Block: %d Content: %s\n", fp->nodes[i].blocks[0], fp->blocks[block].data);
         }
     }
+}
+
+void echo() {
+    char *p = cmd;
+    p += strlen("echo");
+    char *str, *path;
+    while (*p == ' ' || *p == '\0') p++;
+    if (*p == '\0') {
+        printf("ERR: Please input str and path.\n");
+        return;
+    }
+    char sep = (*p == '"') ? '"' : ' ';
+    char *nxt_sep = strchr(p + 1, sep);
+    if (nxt_sep == NULL) {
+        printf("ERR: Please input str and path.\n");
+        return;
+    }
+    path = nxt_sep+1;
+    while (*path == ' ' || *path == '\0') path++;
+    *nxt_sep = '\0';
+    str = p + (sep == '"');
+
+    if (*p == '\0') {
+        printf("ERR: Please input str and path path.\n");
+        return;
+    }
+
+    size_t len = strlen(path);
+    if (len > 0 && path[len - 1] == '/') {
+        path[len - 1] = '\0';
+    }
+    temp_depth = cur_depth;
+    memcpy(temp_dir_inodes, dir_inodes, sizeof(dir_inodes));
+    if (strchr(path, '/') != NULL) {
+        char *last_sep = strrchr(path, '/');
+        *last_sep = '\0';
+        uint32_t result = 0;
+        if (last_sep == path) { // root
+            result = find_path_inode("/");
+        } else {
+            result = find_path_inode(path);
+        }
+        if (result == ERROR) {
+            return;
+        }
+        path = last_sep + 1;
+    }
+    len = strlen(path);
+    if (len >= 252 - 1) {
+        printf("ERR: File name length exceed limit.\n");
+        return;
+    }
+    for (size_t i = 0; i < len; i++) {
+        if (!(isalnum(path[i]) || path[i] == '.' || path[i] == '_')) {
+            printf("ERR: Path cannot contain invalid char.\n");
+            return;
+        }
+    }
+
+    uint32_t id = temp_dir_inodes[temp_depth];
+    uint32_t block;
+    block = fp->nodes[id].blocks[0];
+    for (int i = 0; i < MAX_DIRENTRY_PER_BLOCK; i++) {
+        if (fp->nodes[id].bitmap[i] != 0) {
+            if (strcmp(path, fp->blocks[block].entries[i].name) == 0) {
+                printf("ERR: Name already occupied.\n");
+                return;
+            }
+        }
+    }
+    uint32_t new_inode = allocate_dir_inode();
+    if (new_inode != ERROR) {
+        for (int i = 0; i < MAX_DIRENTRY_PER_BLOCK; i++) {
+            if (fp->nodes[id].bitmap[i] == 0) {
+                fp->nodes[id].entry_count++;
+                fp->nodes[id].bitmap[i] = 1;
+                fp->nodes[new_inode].mode = MODE_FILE;
+                strcpy(fp->blocks[block].entries[i].name, path);
+                fp->blocks[block].entries[i].id = new_inode;
+                strcpy(fp->blocks[fp->nodes[new_inode].blocks[0]].data, str);
+                break;
+            }
+        }
+    }
+}
+
+void cat() {
+    if (strtok(cmd, " ") != NULL) {
+        char *path = strtok(NULL, " ");
+        if (path == NULL) {
+            printf("ERR: Please specify file path.\n");
+            return;
+        }
+
+        size_t len = strlen(path);
+        if (len > 0 && path[len - 1] == '/') {
+            path[len - 1] = '\0';
+        }
+        temp_depth = cur_depth;
+        memcpy(temp_dir_inodes, dir_inodes, sizeof(dir_inodes));
+        if (strchr(path, '/') != NULL) {
+            char *last_sep = strrchr(path, '/');
+            *last_sep = '\0';
+            uint32_t result = 0;
+            if (last_sep == path) { // root
+                result = find_path_inode("/");
+            } else {
+                result = find_path_inode(path);
+            }
+            if (result == ERROR) {
+                return;
+            }
+            path = last_sep + 1;
+        }
+        len = strlen(path);
+        if (len >= 252 - 1) {
+            printf("ERR: File name length exceed limit.\n");
+            return;
+        }
+        for (size_t i = 0; i < len; i++) {
+            if (!(isalnum(path[i]) || path[i] == '.' || path[i] == '_')) {
+                printf("ERR: Path cannot contain invalid char.\n");
+                return;
+            }
+        }
+
+        uint32_t id = temp_dir_inodes[temp_depth];
+        uint32_t block;
+        block = fp->nodes[id].blocks[0];
+        for (int i = 0; i < MAX_DIRENTRY_PER_BLOCK; i++) {
+            if (fp->nodes[id].bitmap[i] != 0) {
+                if (strcmp(path, fp->blocks[block].entries[i].name) == 0) {
+                    uint32_t index = fp->blocks[block].entries[i].id;
+                    printf("%s\n", fp->blocks[fp->nodes[index].blocks[0]].data);
+                    return;
+                }
+            }
+        }
+        printf("ERR: File not found.\n");
+        return;
+    }
+}
+
+void rm() {
+
+}
+
+void usage() {
+    printf("extfs: A persisten in-memory fs.\n"
+                   "commands:\n"
+                   "\tread: read from %s.\n"
+                   "\twrite: write to %s.\n"
+                   "\tpwd: print working directory.\n"
+                   "\tcd: change directory.\n"
+                   "\tmkdir: make directory.\n"
+                   "\tls: list directory.\n"
+                   "\techo: write to file.\n"
+                   "\tcat: show file.\n"
+                   "\trm: remove file.\n"
+                   "\tfmt: format disk.\n"
+                   "\tdmp: dump internal presentation.\n",
+           DATA_FILE, DATA_FILE);
 }
 
 int run_command() {
@@ -471,15 +605,17 @@ int run_command() {
     } else if (strncmp(cmd, "rmdir", 5) == 0) {
         rmdir();
     } else if (strncmp(cmd, "echo", 4) == 0) {
-
+        echo();
     } else if (strncmp(cmd, "cat", 3) == 0) {
-
+        cat();
     } else if (strncmp(cmd, "rm", 2) == 0) {
-
+        rm();
     } else if (strcmp(cmd, "fmt") == 0) {
         format();
     } else if (strcmp(cmd, "dmp") == 0) {
         dump_inode();
+    } else {
+        usage();
     }
     return 0;
 }
