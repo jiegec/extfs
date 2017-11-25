@@ -458,7 +458,7 @@ void echo() {
                 fp->nodes[id].bitmap[i] = 1;
                 strcpy(fp->blocks[block].entries[i].name, file_name);
                 fp->blocks[block].entries[i].id = new_inode;
-                uint32_t len = (uint32_t)strlen(str);
+                uint32_t len = (uint32_t) strlen(str);
                 fp->nodes[new_inode].file_size = len;
                 memcpy(fp->blocks[fp->nodes[new_inode].blocks[0]].data, str, len);
                 break;
@@ -511,13 +511,13 @@ void rm() {
     size_t len = strlen(path);
     if (len > 0 && path[len - 1] == '/') {
         printf("ERR: Use rmdir to remove dir.\n");
-        return ;
+        return;
     }
     temp_depth = cur_depth;
     memcpy(temp_dir_inodes, dir_inodes, sizeof(dir_inodes));
     split_path(&path, &file_name);
     if (find_path_inode(path) == ERROR || check_filename_valid(file_name) == ERROR)
-        return ;
+        return;
 
     uint32_t id = temp_dir_inodes[temp_depth];
     uint32_t block;
@@ -542,8 +542,9 @@ void rm() {
 }
 
 void usage() {
-    printf("extfs: A persisten in-memory fs.\n"
+    printf("extfs: A persistent in-memory fs.\n"
                    "commands:\n"
+                   "\tq: quit extfs.\n"
                    "\tread: read from %s.\n"
                    "\twrite: write to %s.\n"
                    "\tpwd: print working directory.\n"
