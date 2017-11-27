@@ -3,14 +3,14 @@
 #include <string.h>
 #include <ctype.h>
 
-const int MAX_INODE = 4096;
-const int MAX_BLOCK = 4096;
-const int MAX_BLOCKS_PER_FILE = 1;
-const int MAX_FILENAME = 252;
-const int MAX_DIRENTRY_PER_BLOCK = 16;
-const uint32_t ERROR = 0xFFFFFFFF;
+#define MAX_INODE 4096
+#define MAX_BLOCK 4096
+#define MAX_BLOCKS_PER_FILE 1
+#define MAX_FILENAME 252
+#define MAX_DIRENTRY_PER_BLOCK 16
+#define ERROR 0x7FFFFFFF
+#define BUFFER_LEN 4096
 const char *DATA_FILE = "data.dsk";
-const int BUFFER_LEN = 4096;
 
 const int MODE_DIR = 1;
 const int MODE_FILE = 2;
@@ -334,9 +334,10 @@ void mkdir() {
                 fp->nodes[id].bitmap[i] = 1;
                 strcpy(fp->blocks[block].entries[i].name, file_name);
                 fp->blocks[block].entries[i].id = new_inode;
-                break;
+                return ;
             }
         }
+        printf("ERR: Dir entry full.\n");
     }
 }
 
@@ -436,7 +437,7 @@ void echo() {
     temp_depth = cur_depth;
     memcpy(temp_dir_inodes, dir_inodes, sizeof(dir_inodes));
     split_path(&path, &file_name);
-    if (find_path_inode(path) == ERROR || check_filename_valid(path) == ERROR)
+    if (find_path_inode(path) == ERROR || check_filename_valid(file_name) == ERROR)
         return;
 
     uint32_t id = temp_dir_inodes[temp_depth];
@@ -461,9 +462,10 @@ void echo() {
                 uint32_t len = (uint32_t) strlen(str);
                 fp->nodes[new_inode].file_size = len;
                 memcpy(fp->blocks[fp->nodes[new_inode].blocks[0]].data, str, len);
-                break;
+                return ;
             }
         }
+        printf("ERR: Dir entry full.\n");
     }
 }
 
