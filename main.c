@@ -142,6 +142,7 @@ uint32_t find_path_inode(char *path) {
     memcpy(temp_dir_inodes, dir_inodes, sizeof(dir_inodes));
     if (len == 0) {
         temp_depth = cur_depth;
+        free(temp);
         return temp_dir_inodes[temp_depth];
     }
     if (len > 0 && path[0] == '/') { // absolute
