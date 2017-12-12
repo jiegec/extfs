@@ -19,6 +19,7 @@
 #include <stdlib.h>
 #include <string.h>
 #include <ctype.h>
+#include <stdint.h>
 
 #define MAX_INODE 4096
 #define MAX_BLOCK 4096
@@ -57,9 +58,7 @@ struct entry {
 
 union data {
     char data[4096];
-    struct {
-        struct entry entries[MAX_DIRENTRY_PER_BLOCK];
-    };
+    struct entry entries[MAX_DIRENTRY_PER_BLOCK];
 };
 
 struct file {
@@ -170,6 +169,8 @@ uint32_t find_path_inode(char *path) {
         temp_depth = cur_depth;
     }
     char *name = strtok(temp, "/");
+    int found;
+    uint32_t block;
     while (name != NULL) {
         if (strcmp(name, "") == 0 || strcmp(name, ".") == 0) {
             goto next;
@@ -182,9 +183,8 @@ uint32_t find_path_inode(char *path) {
             cur_inode = temp_dir_inodes[--temp_depth];
             goto next;
         }
-        uint32_t block;
         block = fp->nodes[cur_inode].blocks[0];
-        int found = 0;
+        found = 0;
         for (int i = 0; i < MAX_DIRENTRY_PER_BLOCK; i++) {
             if (fp->nodes[cur_inode].bitmap[i] != 0) {
                 uint32_t id = fp->blocks[block].entries[i].id;
@@ -204,7 +204,7 @@ uint32_t find_path_inode(char *path) {
             printf("ERR: Bad path.\n");
             return ERROR;
         }
-        next:
+    next:
         name = strtok(NULL, "/");
     }
     free(temp);
@@ -289,18 +289,41 @@ void cd() {
 
 void ls() {
     char *path;
+    path = extract_argument();
+    if (path == NULL) {
+        path = ".";
+    }
+
+    remove_ending_slash(path);
     temp_depth = cur_depth;
     memcpy(temp_dir_inodes, dir_inodes, sizeof(dir_inodes));
-    path = extract_argument();
-    if (path != NULL && find_path_inode(path) == ERROR) {
+    char *file_name;
+    split_path(&path, &file_name);
+    if (find_path_inode(path) == ERROR)
         return;
+
+    uint32_t id = temp_dir_inodes[temp_depth];
+    uint32_t block;
+    block = fp->nodes[id].blocks[0];
+    for (int i = 0; i < MAX_DIRENTRY_PER_BLOCK; i++) {
+        if (fp->nodes[id].bitmap[i] != 0) {
+            if (strcmp(file_name, fp->blocks[block].entries[i].name) == 0) {
+                uint32_t id = fp->blocks[block].entries[i].id;
+                if (fp->nodes[id].mode == MODE_FILE) {
+                    printf("%s\n", fp->blocks[block].entries[i].name);
+                    return ;
+                } else if (fp->nodes[id].mode == MODE_DIR) {
+                    temp_dir_inodes[++temp_depth] = fp->blocks[block].entries[i].id;
+                    break;
+                }
+            }
+        }
     }
 
     if (temp_depth > 0) {
         printf("../\n");
     }
     printf("./\n");
-    uint32_t block;
     block = fp->nodes[temp_dir_inodes[temp_depth]].blocks[0];
     for (int i = 0; i < MAX_DIRENTRY_PER_BLOCK; i++) {
         if (fp->nodes[temp_dir_inodes[temp_depth]].bitmap[i] != 0) {
@@ -563,19 +586,19 @@ void rm() {
 
 void usage() {
     printf("extfs: A persistent in-memory fs.\n"
-                   "commands:\n"
-                   "\tq: quit extfs.\n"
-                   "\tread: read from %s.\n"
-                   "\twrite: write to %s.\n"
-                   "\tpwd: print working directory.\n"
-                   "\tcd: change directory.\n"
-                   "\tmkdir: make directory.\n"
-                   "\tls: list directory.\n"
-                   "\techo: write to file.\n"
-                   "\tcat: show file.\n"
-                   "\trm: remove file.\n"
-                   "\tfmt: format disk.\n"
-                   "\tdmp: dump internal presentation.\n",
+           "commands:\n"
+           "\tq: quit extfs.\n"
+           "\tread: read from %s.\n"
+           "\twrite: write to %s.\n"
+           "\tpwd: print working directory.\n"
+           "\tcd: change directory.\n"
+           "\tmkdir: make directory.\n"
+           "\tls: list directory.\n"
+           "\techo: write to file.\n"
+           "\tcat: show file.\n"
+           "\trm: remove file.\n"
+           "\tfmt: format disk.\n"
+           "\tdmp: dump internal presentation.\n",
            DATA_FILE, DATA_FILE);
 }
 
@@ -644,7 +667,7 @@ int main() {
         if (run_command() == 1)
             break;
 
-        next:
+    next:
         printf(">> ");
         fflush(stdout);
     }
