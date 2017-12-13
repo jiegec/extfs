@@ -23,15 +23,18 @@
 
 #define MAX_INODE 4096
 #define MAX_BLOCK 4096
-#define MAX_BLOCKS_PER_FILE 1
+#define MAX_BLOCKS_PER_INODE 1
 #define MAX_FILENAME 252
 #define MAX_DIRENTRY_PER_BLOCK 16
 #define ERROR 0x7FFFFFFF
 #define BUFFER_LEN 4096
+#define CURRENT_VERSION 20171213
+#define INVALID_INODE UINT16_MAX
 const char *DATA_FILE = "data.dsk";
 
 const int MODE_DIR = 1;
 const int MODE_FILE = 2;
+const int MODE_CONT = 3;
 
 const int BLOCK_DATA = 1;
 const int BLOCK_DIR_ENTRY = 2;
@@ -46,9 +49,10 @@ struct super_block {
 struct inode {
     uint32_t mode;
     uint32_t file_size;
+    uint16_t entry_count;
+    uint16_t next_inode; // for dir with more than 16 dir entries
     uint8_t bitmap[16];
-    uint32_t entry_count;
-    uint32_t blocks[MAX_BLOCKS_PER_FILE];
+    uint32_t blocks[MAX_BLOCKS_PER_INODE];
 };
 
 struct entry {
@@ -62,6 +66,7 @@ union data {
 };
 
 struct file {
+    uint32_t version;
     struct super_block sb;
     struct inode nodes[4096];
     union data blocks[4096];
@@ -69,7 +74,7 @@ struct file {
 
 char cmd[BUFFER_LEN], buffer[BUFFER_LEN];
 char *cur_cmd, *cmd_end;
-uint32_t cur_depth = 0, temp_depth = 0;
+uint32_t cur_depth = 0, temp_cur_depth = 0;
 uint32_t dir_inodes[256];
 uint32_t temp_dir_inodes[256];
 
@@ -84,6 +89,7 @@ uint32_t allocate_inode(uint32_t mode, uint8_t block) {
                     memset(fp->nodes[i].bitmap, 0, sizeof(fp->nodes[i].bitmap));
                     fp->nodes[i].blocks[0] = j;
                     fp->nodes[i].mode = mode;
+                    fp->nodes[i].next_inode = INVALID_INODE;
                     return i;
                 }
             }
@@ -152,22 +158,21 @@ void split_path(char **path, char **file_name) {
 
 uint32_t find_path_inode(char *path) {
     size_t len = strlen(path);
-    char *temp = (char *) malloc((len + 1) * sizeof(char));
-    strcpy(temp, path);
     uint32_t cur_inode;
     memcpy(temp_dir_inodes, dir_inodes, sizeof(dir_inodes));
     if (len == 0) {
-        temp_depth = cur_depth;
-        free(temp);
-        return temp_dir_inodes[temp_depth];
+        temp_cur_depth = cur_depth;
+        return temp_dir_inodes[temp_cur_depth];
     }
-    if (len > 0 && path[0] == '/') { // absolute
+    if (path[0] == '/') { // absolute
         cur_inode = temp_dir_inodes[0];
-        temp_depth = 0;
+        temp_cur_depth = 0;
     } else { // relative
         cur_inode = temp_dir_inodes[cur_depth];
-        temp_depth = cur_depth;
+        temp_cur_depth = cur_depth;
     }
+    char *temp = (char *) malloc((len + 1) * sizeof(char));
+    strcpy(temp, path);
     char *name = strtok(temp, "/");
     int found;
     uint32_t block;
@@ -175,33 +180,36 @@ uint32_t find_path_inode(char *path) {
         if (strcmp(name, "") == 0 || strcmp(name, ".") == 0) {
             goto next;
         } else if (strcmp(name, "..") == 0) {
-            if (temp_depth == 0) {
+            if (temp_cur_depth == 0) {
                 printf("ERR: Already at root.\n");
                 free(temp);
                 return ERROR;
             }
-            cur_inode = temp_dir_inodes[--temp_depth];
+            cur_inode = temp_dir_inodes[--temp_cur_depth];
             goto next;
         }
-        block = fp->nodes[cur_inode].blocks[0];
+
         found = 0;
-        for (int i = 0; i < MAX_DIRENTRY_PER_BLOCK; i++) {
-            if (fp->nodes[cur_inode].bitmap[i] != 0) {
-                uint32_t id = fp->blocks[block].entries[i].id;
-                if (strcmp(name, fp->blocks[block].entries[i].name) == 0) {
-                    found = 1;
-                    cur_inode = id;
-                    temp_dir_inodes[++temp_depth] = cur_inode;
-                    break;
+        int temp_inode = cur_inode;
+        do {
+            block = fp->nodes[temp_inode].blocks[0];
+            for (int i = 0; i < MAX_DIRENTRY_PER_BLOCK; i++) {
+                if (fp->nodes[temp_inode].bitmap[i] != 0) {
+                    uint32_t id = fp->blocks[block].entries[i].id;
+                    if (strcmp(name, fp->blocks[block].entries[i].name) == 0) {
+                        found = 1;
+                        cur_inode = id;
+                        temp_dir_inodes[++temp_cur_depth] = cur_inode;
+                        break;
+                    }
                 }
             }
-        }
+            temp_inode = fp->nodes[temp_inode].next_inode;
+        } while (temp_inode != INVALID_INODE);
+
         if (!found) {
             free(temp);
             printf("ERR: Path not found.\n");
-            return ERROR;
-        } else if (fp->nodes[cur_inode].mode != MODE_DIR) {
-            printf("ERR: Bad path.\n");
             return ERROR;
         }
     next:
@@ -218,15 +226,19 @@ void pwd(int output) {
         for (i = 0; i < cur_depth; i++) {
             strcat(buffer, "/");
 
-            block = fp->nodes[dir_inodes[i]].blocks[0];
-            for (int j = 0; j < MAX_DIRENTRY_PER_BLOCK; j++) {
-                if (fp->nodes[dir_inodes[i]].bitmap[j] != 0) {
-                    if (dir_inodes[i + 1] == fp->blocks[block].entries[j].id) {
-                        strcat(buffer, fp->blocks[block].entries[j].name);
-                        break;
+            int temp_inode = dir_inodes[i];
+            do {
+                block = fp->nodes[temp_inode].blocks[0];
+                for (int j = 0; j < MAX_DIRENTRY_PER_BLOCK; j++) {
+                    if (fp->nodes[temp_inode].bitmap[j] != 0) {
+                        if (dir_inodes[i + 1] == fp->blocks[block].entries[j].id) {
+                            strcat(buffer, fp->blocks[block].entries[j].name);
+                            break;
+                        }
                     }
                 }
-            }
+                temp_inode = fp->nodes[temp_inode].next_inode;
+            } while (temp_inode != INVALID_INODE);
         }
     } else {
         strcpy(buffer, "/");
@@ -239,6 +251,7 @@ void pwd(int output) {
 void format() {
     printf("Formatting disk...\n");
     memset(fp, 0, sizeof(struct file));
+    fp->version = CURRENT_VERSION;
     cur_depth = 0;
     uint32_t root_inode = allocate_inode(MODE_DIR, BLOCK_DIR_ENTRY);
     dir_inodes[cur_depth] = root_inode;
@@ -255,6 +268,10 @@ void read_fs() {
         fread(fp, sizeof(struct file), 1, FP);
         fclose(FP);
         printf("Reading done.\n");
+        if (fp->version != CURRENT_VERSION) {
+            printf("ERR: disk version mismatch -- creating a new disk.\n");
+            format();
+        }
     }
 }
 
@@ -272,7 +289,7 @@ void write_fs() {
 
 void cd() {
     char *path;
-    temp_depth = cur_depth;
+    temp_cur_depth = cur_depth;
     memcpy(temp_dir_inodes, dir_inodes, sizeof(dir_inodes));
     path = extract_argument();
     if (path == NULL) {
@@ -280,10 +297,15 @@ void cd() {
         return;
     }
 
-    if (find_path_inode(path) == ERROR) {
+    int new_inode;
+    if ((new_inode = find_path_inode(path)) == ERROR) {
         return;
     }
-    cur_depth = temp_depth;
+    if (fp->nodes[new_inode].mode != MODE_DIR) {
+        printf("ERR: Bad path.\n");
+        return;
+    }
+    cur_depth = temp_cur_depth;
     memcpy(dir_inodes, temp_dir_inodes, sizeof(dir_inodes));
 }
 
@@ -294,47 +316,51 @@ void ls() {
         path = ".";
     }
 
-    remove_ending_slash(path);
-    temp_depth = cur_depth;
-    memcpy(temp_dir_inodes, dir_inodes, sizeof(dir_inodes));
-    char *file_name;
-    split_path(&path, &file_name);
-    if (find_path_inode(path) == ERROR)
+    uint32_t cur_inode;
+    if ((cur_inode = find_path_inode(path)) == ERROR)
         return;
 
-    uint32_t id = temp_dir_inodes[temp_depth];
-    uint32_t block;
-    block = fp->nodes[id].blocks[0];
-    for (int i = 0; i < MAX_DIRENTRY_PER_BLOCK; i++) {
-        if (fp->nodes[id].bitmap[i] != 0) {
-            if (strcmp(file_name, fp->blocks[block].entries[i].name) == 0) {
-                uint32_t id = fp->blocks[block].entries[i].id;
-                if (fp->nodes[id].mode == MODE_FILE) {
-                    printf("%s\n", fp->blocks[block].entries[i].name);
-                    return ;
-                } else if (fp->nodes[id].mode == MODE_DIR) {
-                    temp_dir_inodes[++temp_depth] = fp->blocks[block].entries[i].id;
-                    break;
+    if (fp->nodes[cur_inode].mode == MODE_FILE) {
+        uint32_t id = temp_dir_inodes[temp_cur_depth-1];
+        uint32_t block;
+        int temp_inode = id;
+        do {
+            block = fp->nodes[temp_inode].blocks[0];
+            for (int i = 0; i < MAX_DIRENTRY_PER_BLOCK; i++) {
+                if (fp->nodes[temp_inode].bitmap[i] != 0) {
+                    if (fp->blocks[block].entries[i].id == cur_inode) {
+                        printf("%s\n", fp->blocks[block].entries[i].name);
+                    }
                 }
             }
-        }
+            temp_inode = fp->nodes[temp_inode].next_inode;
+        } while (temp_inode != INVALID_INODE);
+        return ;
     }
 
-    if (temp_depth > 0) {
+    if (temp_cur_depth > 0) {
         printf("../\n");
     }
     printf("./\n");
-    block = fp->nodes[temp_dir_inodes[temp_depth]].blocks[0];
-    for (int i = 0; i < MAX_DIRENTRY_PER_BLOCK; i++) {
-        if (fp->nodes[temp_dir_inodes[temp_depth]].bitmap[i] != 0) {
-            uint32_t id = fp->blocks[block].entries[i].id;
-            if (fp->nodes[id].mode == MODE_DIR) {
-                printf("%s/\n", fp->blocks[block].entries[i].name);
-            } else if (fp->nodes[id].mode == MODE_FILE) {
-                printf("%s\n", fp->blocks[block].entries[i].name);
+
+    uint32_t id = cur_inode;
+    uint32_t block;
+    int temp_inode = id;
+    do {
+        block = fp->nodes[temp_inode].blocks[0];
+        for (int i = 0; i < MAX_DIRENTRY_PER_BLOCK; i++) {
+            if (fp->nodes[temp_inode].bitmap[i] != 0) {
+                uint32_t id = fp->blocks[block].entries[i].id;
+                if (fp->nodes[id].mode == MODE_DIR) {
+                    printf("%s/\n", fp->blocks[block].entries[i].name);
+                } else if (fp->nodes[id].mode == MODE_FILE) {
+                    printf("%s\n", fp->blocks[block].entries[i].name);
+                }
             }
         }
-    }
+        temp_inode = fp->nodes[temp_inode].next_inode;
+    } while (temp_inode != INVALID_INODE);
+
 }
 
 void mkdir() {
@@ -349,120 +375,173 @@ void mkdir() {
     }
 
     remove_ending_slash(path);
-    temp_depth = cur_depth;
+    temp_cur_depth = cur_depth;
     memcpy(temp_dir_inodes, dir_inodes, sizeof(dir_inodes));
     char *file_name;
     split_path(&path, &file_name);
     if (find_path_inode(path) == ERROR || check_filename_valid(file_name) == ERROR)
         return;
 
-    uint32_t id = temp_dir_inodes[temp_depth];
+
+    uint32_t cur_inode = temp_dir_inodes[temp_cur_depth];
+    if (fp->nodes[cur_inode].mode != MODE_DIR) {
+        printf("ERR: Bad path.\n");
+    }
+
+    uint32_t temp_inode = cur_inode;
     uint32_t block;
-    block = fp->nodes[id].blocks[0];
-    for (int i = 0; i < MAX_DIRENTRY_PER_BLOCK; i++) {
-        if (fp->nodes[id].bitmap[i] != 0) {
-            if (strcmp(file_name, fp->blocks[block].entries[i].name) == 0) {
-                printf("ERR: Name already occupied.\n");
-                return;
+    do {
+        block = fp->nodes[temp_inode].blocks[0];
+        for (int i = 0; i < MAX_DIRENTRY_PER_BLOCK; i++) {
+            if (fp->nodes[temp_inode].bitmap[i] != 0) {
+                if (strcmp(file_name, fp->blocks[block].entries[i].name) == 0) {
+                    printf("ERR: Name already occupied.\n");
+                    return;
+                }
             }
         }
-    }
+        temp_inode = fp->nodes[temp_inode].next_inode;
+    } while (temp_inode != INVALID_INODE);
+
     uint32_t new_inode = allocate_inode(MODE_DIR, BLOCK_DIR_ENTRY);
     if (new_inode != ERROR) {
-        for (int i = 0; i < MAX_DIRENTRY_PER_BLOCK; i++) {
-            if (fp->nodes[id].bitmap[i] == 0) {
-                fp->nodes[id].entry_count++;
-                fp->nodes[id].bitmap[i] = 1;
-                strcpy(fp->blocks[block].entries[i].name, file_name);
-                fp->blocks[block].entries[i].id = new_inode;
-                return ;
+        uint32_t prev_inode = INVALID_INODE;
+        temp_inode = cur_inode;
+        do {
+            block = fp->nodes[temp_inode].blocks[0];
+            for (int i = 0; i < MAX_DIRENTRY_PER_BLOCK; i++) {
+                if (fp->nodes[temp_inode].bitmap[i] == 0) {
+                    fp->nodes[temp_inode].entry_count++;
+                    fp->nodes[temp_inode].bitmap[i] = 1;
+                    strcpy(fp->blocks[block].entries[i].name, file_name);
+                    fp->blocks[block].entries[i].id = new_inode;
+                    return ;
+                }
             }
+            prev_inode = temp_inode;
+            temp_inode = fp->nodes[temp_inode].next_inode;
+        } while (temp_inode != INVALID_INODE);
+
+        printf("INFO: Dir entry limit exceeded and creating a new inode for it.\n");
+        uint32_t new_cont = allocate_inode(MODE_CONT, BLOCK_DIR_ENTRY);
+        if (new_cont != ERROR) {
+            block = fp->nodes[new_cont].blocks[0];
+            fp->nodes[new_cont].entry_count++;
+            fp->nodes[new_cont].bitmap[0] = 1;
+            strcpy(fp->blocks[block].entries[0].name, file_name);
+            fp->blocks[block].entries[0].id = new_inode;
+            fp->nodes[prev_inode].next_inode = new_cont;
         }
-        printf("ERR: Dir entry full.\n");
     }
 }
 
-void rmdir_recursively(uint32_t id) {
+void rmdir_recursively(uint32_t inode) {
+    uint32_t temp_inode = inode;
     uint32_t block;
-    block = fp->nodes[id].blocks[0];
-    for (int i = 0; i < MAX_DIRENTRY_PER_BLOCK; i++) {
-        if (fp->nodes[id].bitmap[i] != 0) {
-            uint32_t cur_id = fp->blocks[block].entries[i].id;
-            if (fp->nodes[cur_id].mode == MODE_DIR) {
-                rmdir_recursively(cur_id);
+    do {
+        block = fp->nodes[temp_inode].blocks[0];
+        for (int i = 0; i < MAX_DIRENTRY_PER_BLOCK; i++) {
+            if (fp->nodes[temp_inode].bitmap[i] != 0) {
+                uint32_t cur_id = fp->blocks[block].entries[i].id;
+                if (fp->nodes[cur_id].mode == MODE_DIR) {
+                    rmdir_recursively(cur_id);
+                }
+                fp->nodes[temp_inode].entry_count--;
+                fp->nodes[temp_inode].bitmap[i] = 0;
+                uint32_t temp_sub_inode = cur_id;
+                do {
+                    fp->sb.block_bitmap[fp->nodes[temp_sub_inode].blocks[0]] = 0;
+                    fp->sb.inode_bitmap[temp_sub_inode] = 0;
+                    temp_sub_inode = fp->nodes[temp_sub_inode].next_inode;
+                } while (temp_sub_inode != INVALID_INODE);
             }
-            fp->nodes[id].entry_count--;
-            fp->nodes[id].bitmap[i] = 0;
-            fp->sb.block_bitmap[fp->nodes[cur_id].blocks[0]] = 0;
-            fp->sb.inode_bitmap[cur_id] = 0;
         }
-    }
+        temp_inode = fp->nodes[temp_inode].next_inode;
+    } while (temp_inode != INVALID_INODE);
 }
 
 void rmdir() {
-    char *path = extract_argument(), *file_name;
-    if (strcmp(path, "/") == 0) {
+    char *path = extract_argument();
+
+    uint32_t cur_inode;
+    if ((cur_inode = find_path_inode(path)) == ERROR) {
+        return;
+    }
+
+    if (cur_inode == dir_inodes[0]) {
         format();
         return;
     }
 
-    remove_ending_slash(path);
-    temp_depth = cur_depth;
-    memcpy(temp_dir_inodes, dir_inodes, sizeof(dir_inodes));
-    split_path(&path, &file_name);
-    if (find_path_inode(path) == ERROR || check_filename_valid(file_name) == ERROR) {
+    if (fp->nodes[cur_inode].mode != MODE_DIR) {
+        printf("ERR: Cannot rmdir a file.\n");
         return;
     }
 
-    uint32_t id = temp_dir_inodes[temp_depth];
-
+    uint32_t temp_inode = temp_dir_inodes[temp_cur_depth-1];
     uint32_t block;
-    block = fp->nodes[id].blocks[0];
-    for (int i = 0; i < MAX_DIRENTRY_PER_BLOCK; i++) {
-        if (fp->nodes[id].bitmap[i] != 0) {
-            if (strcmp(file_name, fp->blocks[block].entries[i].name) == 0) {
-                uint32_t cur_id = fp->blocks[block].entries[i].id;
-                if (fp->nodes[cur_id].mode == MODE_FILE) {
-                    printf("ERR: Rmdir cannot remove file.\n");
-                } else if (fp->nodes[cur_id].mode == MODE_DIR) {
-                    rmdir_recursively(cur_id);
-                    fp->nodes[id].entry_count--;
-                    fp->nodes[id].bitmap[i] = 0;
-                    if (cur_id != dir_inodes[0]) { // not root
-                        fp->sb.block_bitmap[fp->nodes[cur_id].blocks[0]] = 0;
-                        fp->sb.inode_bitmap[cur_id] = 0;
+    do {
+        block = fp->nodes[temp_inode].blocks[0];
+        for (int i = 0; i < MAX_DIRENTRY_PER_BLOCK; i++) {
+            if (fp->nodes[temp_inode].bitmap[i] != 0) {
+                if (fp->blocks[block].entries[i].id == cur_inode) {
+                    rmdir_recursively(cur_inode);
+                    fp->nodes[temp_inode].entry_count--;
+                    fp->nodes[temp_inode].bitmap[i] = 0;
+
+                    uint32_t temp_sub_inode = cur_inode;
+                    do {
+                        fp->sb.block_bitmap[fp->nodes[temp_sub_inode].blocks[0]] = 0;
+                        fp->sb.inode_bitmap[temp_sub_inode] = 0;
+                        temp_sub_inode = fp->nodes[temp_sub_inode].next_inode;
+                    } while (temp_sub_inode != INVALID_INODE);
+
+                    while (fp->sb.inode_bitmap[dir_inodes[cur_depth]] == 0) {
+                        cur_depth--;
                     }
+                    printf("Changing dir to: ");
+                    pwd(1);
+                    return;
                 }
-                while (fp->sb.inode_bitmap[dir_inodes[cur_depth]] == 0) {
-                    cur_depth--;
-                }
-                printf("Changing dir to:");
-                pwd(1);
-                return;
             }
         }
-    }
-    printf("ERR: Dir not found\n");
+        temp_inode = fp->nodes[temp_inode].next_inode;
+    } while (temp_inode != INVALID_INODE);
 }
 
 void dump_inode() {
     for (int i = 0; i < MAX_INODE; i++) {
         if (fp->sb.inode_bitmap[i] == 0)
             continue;
-        if (fp->nodes[i].mode == MODE_DIR) {
-            printf("Inode #%d: dir\n", i);
-            uint32_t block = fp->nodes[i].blocks[0];
-            printf("Block #%d:\n", block);
-            for (int j = 0; j < MAX_DIRENTRY_PER_BLOCK; j++) {
-                if (fp->nodes[i].bitmap[j] != 0) {
-                    printf("Item #%d: Id: %d Name: %s\n", j, fp->blocks[block].entries[j].id,
-                           fp->blocks[block].entries[j].name);
-                }
+        if (fp->nodes[i].mode == MODE_DIR || fp->nodes[i].mode == MODE_CONT) {
+            if (fp->nodes[i].mode == MODE_DIR) {
+                printf("Inode #%d: dir\n", i);
+            } else {
+                printf("Inode #%d: cont\n", i);
             }
+
+            int temp_inode = i;
+            do {
+                uint32_t block = fp->nodes[temp_inode].blocks[0];
+                printf("Block #%d:\n", block);
+                for (int j = 0; j < MAX_DIRENTRY_PER_BLOCK; j++) {
+                    if (fp->nodes[temp_inode].bitmap[j] != 0) {
+                        printf("Item #%d: Id: %d Name: %s\n", j, fp->blocks[block].entries[j].id,
+                               fp->blocks[block].entries[j].name);
+                    }
+                }
+                temp_inode = fp->nodes[temp_inode].next_inode;
+                if (temp_inode != INVALID_INODE) {
+                    printf("Going to next:%d\n", temp_inode);
+                }
+            } while (temp_inode != INVALID_INODE);
         } else if (fp->nodes[i].mode == MODE_FILE) {
             printf("Inode #%d: file\n", i);
             uint32_t block = fp->nodes[i].blocks[0];
             printf("Block: %d Content: %s\n", fp->nodes[i].blocks[0], fp->blocks[block].data);
+        } else if (fp->nodes[i].mode == MODE_CONT) {
+            printf("Inode #%d: cont\n", i);
+            printf("Next is: %d\n", fp->nodes[i].next_inode);
         }
     }
 }
@@ -475,38 +554,62 @@ void echo() {
         return;
     }
 
-    temp_depth = cur_depth;
+    temp_cur_depth = cur_depth;
     memcpy(temp_dir_inodes, dir_inodes, sizeof(dir_inodes));
     split_path(&path, &file_name);
     if (find_path_inode(path) == ERROR || check_filename_valid(file_name) == ERROR)
         return;
 
-    uint32_t id = temp_dir_inodes[temp_depth];
+    uint32_t id = temp_dir_inodes[temp_cur_depth];
     uint32_t block;
-    block = fp->nodes[id].blocks[0];
-    for (int i = 0; i < MAX_DIRENTRY_PER_BLOCK; i++) {
-        if (fp->nodes[id].bitmap[i] != 0) {
-            if (strcmp(file_name, fp->blocks[block].entries[i].name) == 0) {
-                printf("ERR: Name already occupied.\n");
-                return;
+    uint32_t temp_inode = id;
+    do {
+        block = fp->nodes[temp_inode].blocks[0];
+        for (int i = 0; i < MAX_DIRENTRY_PER_BLOCK; i++) {
+            if (fp->nodes[temp_inode].bitmap[i] != 0) {
+                if (strcmp(file_name, fp->blocks[block].entries[i].name) == 0) {
+                    printf("ERR: Name already occupied.\n");
+                    return;
+                }
             }
         }
-    }
+        temp_inode = fp->nodes[temp_inode].next_inode;
+    } while (temp_inode != INVALID_INODE);
+
     uint32_t new_inode = allocate_inode(MODE_FILE, BLOCK_DATA);
     if (new_inode != ERROR) {
-        for (int i = 0; i < MAX_DIRENTRY_PER_BLOCK; i++) {
-            if (fp->nodes[id].bitmap[i] == 0) {
-                fp->nodes[id].entry_count++;
-                fp->nodes[id].bitmap[i] = 1;
-                strcpy(fp->blocks[block].entries[i].name, file_name);
-                fp->blocks[block].entries[i].id = new_inode;
-                uint32_t len = (uint32_t) strlen(str);
-                fp->nodes[new_inode].file_size = len;
-                memcpy(fp->blocks[fp->nodes[new_inode].blocks[0]].data, str, len);
-                return ;
+        temp_inode = id;
+        uint32_t prev_inode = INVALID_INODE;
+        do {
+            block = fp->nodes[temp_inode].blocks[0];
+            for (int i = 0; i < MAX_DIRENTRY_PER_BLOCK; i++) {
+                if (fp->nodes[temp_inode].bitmap[i] == 0) {
+                    fp->nodes[temp_inode].entry_count++;
+                    fp->nodes[temp_inode].bitmap[i] = 1;
+                    strcpy(fp->blocks[block].entries[i].name, file_name);
+                    fp->blocks[block].entries[i].id = new_inode;
+                    uint32_t len = (uint32_t) strlen(str);
+                    fp->nodes[new_inode].file_size = len;
+                    memcpy(fp->blocks[fp->nodes[new_inode].blocks[0]].data, str, len);
+                    return ;
+                }
             }
+            prev_inode = temp_inode;
+            temp_inode = fp->nodes[temp_inode].next_inode;
+        } while (temp_inode != INVALID_INODE);
+
+        printf("INFO: Dir entry limit exceeded and creating a new inode for it.\n");
+        uint32_t new_cont = allocate_inode(MODE_CONT, BLOCK_DIR_ENTRY);
+        if (new_cont != ERROR) {
+            block = fp->nodes[new_cont].blocks[0];
+            fp->nodes[new_cont].entry_count++;
+            fp->nodes[new_cont].bitmap[0] = 1;
+            uint32_t len = (uint32_t) strlen(str);
+            fp->nodes[new_inode].file_size = len;
+            memcpy(fp->blocks[fp->nodes[new_inode].blocks[0]].data, str, len);
+            fp->blocks[block].entries[0].id = new_inode;
+            fp->nodes[prev_inode].next_inode = new_cont;
         }
-        printf("ERR: Dir entry full.\n");
     }
 }
 
@@ -517,30 +620,34 @@ void cat() {
         return;
     }
 
-    temp_depth = cur_depth;
+    temp_cur_depth = cur_depth;
     memcpy(temp_dir_inodes, dir_inodes, sizeof(dir_inodes));
     split_path(&path, &file_name);
     if (find_path_inode(path) == ERROR || check_filename_valid(file_name) == ERROR)
         return;
 
-    uint32_t id = temp_dir_inodes[temp_depth];
+    uint32_t id = temp_dir_inodes[temp_cur_depth];
+    uint32_t temp_inode = id;
     uint32_t block;
-    block = fp->nodes[id].blocks[0];
-    for (int i = 0; i < MAX_DIRENTRY_PER_BLOCK; i++) {
-        if (fp->nodes[id].bitmap[i] != 0) {
-            if (strcmp(file_name, fp->blocks[block].entries[i].name) == 0) {
-                uint32_t index = fp->blocks[block].entries[i].id;
-                if (fp->nodes[index].mode == MODE_DIR) {
-                    printf("ERR: Cannot cat a dir.\n");
+    do {
+        block = fp->nodes[temp_inode].blocks[0];
+        for (int i = 0; i < MAX_DIRENTRY_PER_BLOCK; i++) {
+            if (fp->nodes[temp_inode].bitmap[i] != 0) {
+                if (strcmp(file_name, fp->blocks[block].entries[i].name) == 0) {
+                    uint32_t index = fp->blocks[block].entries[i].id;
+                    if (fp->nodes[index].mode == MODE_DIR) {
+                        printf("ERR: Cannot cat a dir.\n");
+                        return;
+                    }
+                    memcpy(buffer, fp->blocks[fp->nodes[index].blocks[0]].data, fp->nodes[index].file_size);
+                    buffer[fp->nodes[index].file_size] = '\0';
+                    printf("%s\n", buffer);
                     return;
                 }
-                memcpy(buffer, fp->blocks[fp->nodes[index].blocks[0]].data, fp->nodes[index].file_size);
-                buffer[fp->nodes[index].file_size] = '\0';
-                printf("%s\n", buffer);
-                return;
             }
         }
-    }
+        temp_inode = fp->nodes[temp_inode].next_inode;
+    } while (temp_inode != INVALID_INODE);
     printf("ERR: File not found.\n");
 }
 
@@ -556,31 +663,37 @@ void rm() {
         printf("ERR: Use rmdir to remove dir.\n");
         return;
     }
-    temp_depth = cur_depth;
+    temp_cur_depth = cur_depth;
     memcpy(temp_dir_inodes, dir_inodes, sizeof(dir_inodes));
     split_path(&path, &file_name);
     if (find_path_inode(path) == ERROR || check_filename_valid(file_name) == ERROR)
         return;
 
-    uint32_t id = temp_dir_inodes[temp_depth];
+    uint32_t id = temp_dir_inodes[temp_cur_depth];
+    uint32_t temp_inode = id;
     uint32_t block;
-    block = fp->nodes[id].blocks[0];
-    for (int i = 0; i < MAX_DIRENTRY_PER_BLOCK; i++) {
-        if (fp->nodes[id].bitmap[i] != 0) {
-            if (strcmp(file_name, fp->blocks[block].entries[i].name) == 0) {
-                uint32_t index = fp->blocks[block].entries[i].id;
-                if (fp->nodes[index].mode == MODE_DIR) {
-                    printf("ERR: Use mkdir to remove dir.\n");
+    do {
+        block = fp->nodes[temp_inode].blocks[0];
+        for (int i = 0; i < MAX_DIRENTRY_PER_BLOCK; i++) {
+            if (fp->nodes[temp_inode].bitmap[i] != 0) {
+                if (strcmp(file_name, fp->blocks[block].entries[i].name) == 0) {
+                    uint32_t index = fp->blocks[block].entries[i].id;
+                    if (fp->nodes[index].mode == MODE_DIR) {
+                        printf("ERR: Use mkdir to remove dir.\n");
+                        return;
+                    } else {
+                        fp->nodes[temp_inode].entry_count--;
+                        fp->nodes[temp_inode].bitmap[i] = 0;
+                        fp->sb.inode_bitmap[index] = 0;
+                        fp->sb.block_bitmap[fp->nodes[index].blocks[0]] = 0;
+                        printf("File removed.\n");
+                    }
                     return;
-                } else {
-                    fp->nodes[id].entry_count--;
-                    fp->nodes[id].bitmap[i] = 0;
-                    printf("File removed.\n");
                 }
-                return;
             }
         }
-    }
+        temp_inode = fp->nodes[temp_inode].next_inode;
+    } while (temp_inode != INVALID_INODE);
     printf("ERR: File not found.\n");
 }
 
