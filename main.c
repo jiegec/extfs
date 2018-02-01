@@ -760,6 +760,8 @@ int main() {
         if (len > 0 && cmd[len - 1] == '\n') {
             cmd[--len] = '\0';
         }
+        if (len == 0)
+            goto next;
         cur_cmd = cmd;
         cmd_end = cmd + len;
         char *p = cur_cmd;
